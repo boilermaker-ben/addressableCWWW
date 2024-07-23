@@ -1,4 +1,6 @@
 # addressableCWWW
+CURRENTLY IN DEVELOPMENT AND NOT FUNCTIONAL!
+
 Custom ESPHome component to control an addressable CWWW LED strip (WS2811) that takes RGB input to control the warm and cold white channels.
 This is the Amazon listing for the product:
 https://www.amazon.com/BTF-LIGHTING-Addressable-Flexible-3000K-6000K-Decoration/dp/B0BNDRF325
