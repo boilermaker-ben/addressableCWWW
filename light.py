@@ -1,227 +1,240 @@
+from dataclasses import dataclass
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import light
+from esphome.components import esp32_rmt, light
 from esphome.const import (
-    CONF_CHANNEL,
-    CONF_CLOCK_PIN,
-    CONF_DATA_PIN,
-    CONF_METHOD,
+    CONF_CHIPSET,
+    CONF_MAX_REFRESH_RATE,
     CONF_NUM_LEDS,
-    CONF_PIN,
-    CONF_COLD_WHITE_COLOR_TEMPERATURE,
-    CONF_WARM_WHITE_COLOR_TEMPERATURE,
-    CONF_TYPE,
-    CONF_VARIANT,
     CONF_OUTPUT_ID,
-    CONF_INVERT,
-)
-from esphome.components.esp32 import get_esp32_variant
-from esphome.components.esp32.const import (
-    VARIANT_ESP32C3,
-    VARIANT_ESP32S3,
-)
-from esphome.core import CORE
-from ._methods import (
-    METHODS,
-    METHOD_SPI,
-    METHOD_ESP8266_UART,
-    METHOD_BIT_BANG,
-    METHOD_ESP32_I2S,
-    METHOD_ESP32_RMT,
-    METHOD_ESP8266_DMA,
-)
-from .const import (
-    CHIP_TYPES,
-    CONF_ASYNC,
-    CONF_BUS,
-    ONE_WIRE_CHIPS,
+    CONF_PIN,
+    CONF_CHANNELS,
+    CONF_RMT_CHANNEL,
+    CONF_COLOR_TEMPERATURE, 
+    CONF_COLD_WHITE_COLOR_TEMPERATURE,
+    CONF_WARM_WHITE_COLOR_TEMPERATURE
 )
 
-neopixelbus_ns = cg.esphome_ns.namespace("neopixelbusCWWW")
-NeoPixelBusLightOutputBase = neopixelbus_ns.class_(
-    "NeoPixelBusLightOutputBase", light.AddressableLight
+CODEOWNERS = ["@jesserockz","@ben_pow"]
+DEPENDENCIES = ["esp32"]
+
+esp32_rmt_led_strip_channels_ns = cg.esphome_ns.namespace("esp32_rmt_led_strip_channels")
+ESP32RMTLEDStripChannelsLightOutput = esp32_rmt_led_strip_channels_ns.class_(
+    "ESP32RMTLEDStripChannelsLightOutput", light.AddressableLight
 )
-NeoPixelRGBLightOutput = neopixelbus_ns.class_(
-    "NeoPixelRGBLightOutput", NeoPixelBusLightOutputBase
-)
 
-ESPCWWWNeoPixelOrder = neopixelbus_ns.namespace("ESPCWWWNeoPixelOrder")
-# NeoRgbFeature = cg.global_ns.NeoRgbFeature
-# NeoRgbwFeature = cg.global_ns.NeoRgbwFeature
+rmt_channel_t = cg.global_ns.enum("rmt_channel_t")
 
-def validate_type(value):
-    value = cv.string(value).upper()
-    if "C" not in value:
-        raise cv.Invalid("Must have C for 'cool' in type")
-    if "W" not in value:
-        raise cv.Invalid("Must have W for 'warm' in type")
-    if "N" not in value:
-        raise cv.Invalid("Must have N for 'null' in type")        
-    rest = set(value) - set("CWN")
-    if rest:
-        raise cv.Invalid(f"Type has invalid color: {', '.join(rest)}")
-    if len(set(value)) != len(value):
-        raise cv.Invalid("Type has duplicate color!")
-    return value
+@dataclass
+class LEDStripTimings:
+    bit0_high: int
+    bit0_low: int
+    bit1_high: int
+    bit1_low: int
 
+CHIPSETS = {
+    "WS2812": LEDStripTimings(400, 1000, 1000, 400),
+    "WS2811": LEDStripTimings(400, 1000, 1000, 400), #NOT SUPPORTED AS INPUT UNTIL esp32_rmt CODE UPDATED
+    "SK6812": LEDStripTimings(300, 900, 600, 600),
+    "APA106": LEDStripTimings(350, 1360, 1360, 350),
+    "SM16703": LEDStripTimings(300, 900, 900, 300),
+}
 
-def _choose_default_method(config):
-    if CONF_METHOD in config:
-        return config
-    config = config.copy()
-    if CONF_PIN not in config:
-        config[CONF_METHOD] = _validate_method(METHOD_SPI)
-        return config
+CONF_BIT0_HIGH = "bit0_high"
+CONF_BIT0_LOW = "bit0_low"
+CONF_BIT1_HIGH = "bit1_high"
+CONF_BIT1_LOW = "bit1_low"
 
-    pin = config[CONF_PIN]
-    if CORE.is_esp8266:
-        if pin == 3:
-            config[CONF_METHOD] = _validate_method(METHOD_ESP8266_DMA)
-        elif pin == 1:
-            config[CONF_METHOD] = _validate_method(
-                {
-                    CONF_TYPE: METHOD_ESP8266_UART,
-                    CONF_BUS: 0,
-                }
-            )
-        elif pin == 2:
-            config[CONF_METHOD] = _validate_method(
-                {
-                    CONF_TYPE: METHOD_ESP8266_UART,
-                    CONF_BUS: 1,
-                }
-            )
-        else:
-            config[CONF_METHOD] = _validate_method(METHOD_BIT_BANG)
+CONF_COLD_WHITE_COLOR_TEMPERATURE = 'cold_white_color_temperature'
+CONF_WARM_WHITE_COLOR_TEMPERATURE = 'warm_white_color_temperature'
+CONF_CHANNELS = 'channels'
 
-    if CORE.is_esp32:
-        if get_esp32_variant() in (VARIANT_ESP32C3, VARIANT_ESP32S3):
-            config[CONF_METHOD] = _validate_method(METHOD_ESP32_RMT)
-        else:
-            config[CONF_METHOD] = _validate_method(METHOD_ESP32_I2S)
+DEFAULT_COLD_WHITE_COLOR_TEMPERATURE = "6000 K"
+DEFAULT_WARM_WHITE_COLOR_TEMPERATURE = "3000 K"
 
-    return config
+# Define mappings for the allowed channels
+allowed_channel_map = {
+    'red': 'R',
+    'green': 'G',
+    'blue': 'B',
+    'cold_white': 'C',
+    'warm_white': 'W',
+    'white': 'W',  # map both 'white' and 'warm_white' to 'W'
+    'unused': 'N',
+}
 
-
+# Checks for valid characters, max of 4 channels, uniqueness, RGB as a set, W present if C, and then confirms color settings
 def _validate(config):
-    variant = config[CONF_VARIANT]
-    if variant in ONE_WIRE_CHIPS:
-        if CONF_PIN not in config:
-            raise cv.Invalid(
-                f"Chip {variant} is a 1-wire chip and needs the [pin] option."
-            )
-        if CONF_CLOCK_PIN in config or CONF_DATA_PIN in config:
-            raise cv.Invalid(
-                f"Chip {variant} is a 1-wire chip, you need to set [pin] instead of ."
-            )
+    value = config[CONF_CHANNELS]
+
+    reverse_channel_map = {v: k for k, v in allowed_channel_map.items()}
+
+    # Convert list to string format if necessary
+    if isinstance(value, list):
+        value = ''.join([allowed_channel_map[item.lower()] for item in value if item.lower() in allowed_channel_map])
+        input_format = "list"
+    elif isinstance(value, str):
+        value = value.upper()
+        input_format = "string"
     else:
-        if CONF_PIN in config:
+        raise cv.Invalid("Invalid format for channels. Expected a string or a list of valid channel names.")
+
+    # Validate that 4 or fewer channels are supported (limitation of the "get_internal_view" function of addressable_light platform)
+    if len(value) > 4:
+        raise cv.Invalid("A maximum of 4 channel values are supported.")
+
+    for char in value:
+        if char not in allowed_channel_map.values():
             raise cv.Invalid(
-                f"Chip {variant} is a 2-wire chip and needs the [data_pin]+[clock_pin] option instead of [pin]."
-            )
-        if CONF_CLOCK_PIN not in config or CONF_DATA_PIN not in config:
-            raise cv.Invalid(
-                f"Chip {variant} is a 2-wire chip, you need to set [data_pin]+[clock_pin]."
+                f"Invalid character '{char}' in channels string. Expected one of {', '.join(set(allowed_channel_map.values()))}."
             )
 
-    method_type = config[CONF_METHOD][CONF_TYPE]
-    method_desc = METHODS[method_type]
-    if variant not in method_desc.supported_chips:
-        raise cv.Invalid(f"Method {method_type} does not support {variant}")
-    if method_desc.extra_validate is not None:
-        method_desc.extra_validate(config)
+    # Validate uniqueness of channels (except 'N')
+    if len(set(value)) != len(value) and 'N' not in value:
+        if input_format == "list":
+            raise cv.Invalid(
+                "Channels must be unique except for 'unused'."
+            )
+        else:            
+            raise cv.Invalid(
+                "Channels must be unique except for 'N'."
+            )
 
+    rgb_chars = ['R', 'G', 'B']
+    missing_rgb_chars = [char for char in rgb_chars if char not in value]
+
+    if len(missing_rgb_chars) == 3:  # Check for all RGB characters missing
+        pass
+    else:
+        if missing_rgb_chars:
+            if input_format == "list":
+                missing_channels = ', '.join([reverse_channel_map[char] for char in missing_rgb_chars])
+            else:
+                missing_channels = ', '.join(missing_rgb_chars)
+            raise cv.Invalid(
+                f"Missing character(s) '{missing_channels}' in channels."
+            )
+
+    # Check for W in presence of C
+    if 'C' in value and 'W' not in value:
+        if input_format == "list":
+            raise cv.Invalid("Cannot have 'cold_white' without 'warm_white' in the channels list.")
+        else:
+            raise cv.Invalid("Cannot have 'C' without 'W' in the channels string.")
+
+    if 'C' in value and 'R' in value:
+        raise cv.Invalid("Color temperature and RGB not currently supported.")
+
+    validate_temperature_settings(config)
+    
+    config[CONF_CHANNELS] = value
+    
     return config
 
+# Check to only allow color temperature settings when C and W channels present
+def validate_temperature_settings(config):
+    value = config[CONF_CHANNELS]
+    if isinstance(value, list):
+        value = ''.join([allowed_channel_map[item.lower()] for item in value if item.lower() in allowed_channel_map]).upper()
+    else:
+        value = value.upper()
 
-def _validate_method(value):
-    if value is None:
-        # default method is determined afterwards because it depends on the chip type chosen
-        return None
+    # Check for the presence of both C and W
+    if 'C' not in value and 'W' not in value and (config.get(CONF_COLD_WHITE_COLOR_TEMPERATURE) == DEFAULT_COLD_WHITE_COLOR_TEMPERATURE and
+            config.get(CONF_WARM_WHITE_COLOR_TEMPERATURE) == DEFAULT_WARM_WHITE_COLOR_TEMPERATURE):
+            config.pop(CONF_COLD_WHITE_COLOR_TEMPERATURE, None)
+            config.pop(CONF_WARM_WHITE_COLOR_TEMPERATURE, None)
+    
+    # if 'C' in value and 'W' in value:
+    #     pass
+    # else:
+    #     if CONF_COLD_WHITE_COLOR_TEMPERATURE in config or CONF_WARM_WHITE_COLOR_TEMPERATURE in config:
+    #         raise cv.Invalid(
+    #             "Values for 'cold_white_color_temperature' and 'warm_white_color_temperature' are only allowed when both 'C' (cold_white) and 'W' (warm_white) are present in channels."
+    #         )
 
-    compat_methods = {}
-    for bus in [0, 1]:
-        for is_async in [False, True]:
-            compat_methods[f"ESP8266{'_ASYNC' if is_async else ''}_UART{bus}"] = {
-                CONF_TYPE: METHOD_ESP8266_UART,
-                CONF_BUS: bus,
-                CONF_ASYNC: is_async,
-            }
-        compat_methods[f"ESP32_I2S_{bus}"] = {
-            CONF_TYPE: METHOD_ESP32_I2S,
-            CONF_BUS: bus,
-        }
-    for channel in range(8):
-        compat_methods[f"ESP32_RMT_{channel}"] = {
-            CONF_TYPE: METHOD_ESP32_RMT,
-            CONF_CHANNEL: channel,
-        }
-
-    if isinstance(value, str):
-        if value.upper() in compat_methods:
-            return _validate_method(compat_methods[value.upper()])
-        return _validate_method({CONF_TYPE: value})
-    return cv.typed_schema(
-        {k: v.method_schema for k, v in METHODS.items()}, lower=True
-    )(value)
-
-CONF_COLD_WHITE_COLOR_TEMPERATURE = "cold_white_temperature"
-CONF_WARM_WHITE_COLOR_TEMPERATURE = "warm_white_temperature"
+    return config
 
 CONFIG_SCHEMA = cv.All(
-    cv.only_with_arduino,
-    cv.require_framework_version(
-        esp8266_arduino=cv.Version(2, 4, 0),
-        esp32_arduino=cv.Version(0, 0, 0),
-    ),
     light.ADDRESSABLE_LIGHT_SCHEMA.extend(
         {
-            cv.GenerateID(CONF_OUTPUT_ID): cv.declare_id(NeoPixelBusLightOutputBase),
-            cv.Optional(CONF_TYPE, default="CWN"): validate_type,
-            cv.Required(CONF_VARIANT): cv.one_of(*CHIP_TYPES, lower=True),
-            cv.Optional(CONF_METHOD): _validate_method,
-            cv.Optional(CONF_INVERT, default="no"): cv.boolean,
-            cv.Optional(CONF_PIN): pins.internal_gpio_output_pin_number,
-            cv.Optional(CONF_CLOCK_PIN): pins.internal_gpio_output_pin_number,
-            cv.Optional(CONF_DATA_PIN): pins.internal_gpio_output_pin_number,
-            cv.Optional(CONF_COLD_WHITE_COLOR_TEMPERATURE, default="6000 K"): cv.color_temperature,
-            cv.Optional(CONF_WARM_WHITE_COLOR_TEMPERATURE, default="3000 K"): cv.color_temperature,            
+            cv.GenerateID(CONF_OUTPUT_ID): cv.declare_id(ESP32RMTLEDStripChannelsLightOutput),
+            cv.Required(CONF_PIN): pins.internal_gpio_output_pin_number,
             cv.Required(CONF_NUM_LEDS): cv.positive_not_null_int,
-
+            cv.Required(CONF_CHANNELS): cv.Any(cv.string_strict, [cv.one_of('red', 'green', 'blue', 'cold_white', 'warm_white', 'white', 'unused')]),
+            cv.Required(CONF_RMT_CHANNEL): esp32_rmt.validate_rmt_channel(tx=True),
+            cv.Optional(CONF_MAX_REFRESH_RATE): cv.positive_time_period_microseconds,
+            cv.Optional(CONF_CHIPSET): cv.one_of(*CHIPSETS, upper=True),
+            cv.Optional(CONF_COLD_WHITE_COLOR_TEMPERATURE, DEFAULT_COLD_WHITE_COLOR_TEMPERATURE): cv.color_temperature,
+            cv.Optional(CONF_WARM_WHITE_COLOR_TEMPERATURE, DEFAULT_WARM_WHITE_COLOR_TEMPERATURE): cv.color_temperature,
+            cv.Inclusive(
+                CONF_BIT0_HIGH,
+                "custom",
+            ): cv.positive_time_period_nanoseconds,
+            cv.Inclusive(
+                CONF_BIT0_LOW,
+                "custom",
+            ): cv.positive_time_period_nanoseconds,
+            cv.Inclusive(
+                CONF_BIT1_HIGH,
+                "custom",
+            ): cv.positive_time_period_nanoseconds,
+            cv.Inclusive(
+                CONF_BIT1_LOW,
+                "custom",
+            ): cv.positive_time_period_nanoseconds,
         }
-    ).extend(cv.COMPONENT_SCHEMA),
-    _choose_default_method,
+    ),
+    cv.has_none_or_all_keys(
+        [CONF_COLD_WHITE_COLOR_TEMPERATURE, CONF_WARM_WHITE_COLOR_TEMPERATURE]
+    ),
+    cv.has_exactly_one_key(CONF_CHIPSET, CONF_BIT0_HIGH),
     _validate,
 )
 
+
 async def to_code(config):
-    method = config[CONF_METHOD]
-
-    method_template = METHODS[method[CONF_TYPE]].to_code(
-        method, config[CONF_VARIANT], config[CONF_INVERT]
-    )
-
-    out_type = NeoPixelRGBLightOutput.template(method_template)
-    rhs = out_type.new()
-    var = cg.Pvariable(config[CONF_OUTPUT_ID], rhs, out_type)
+    var = cg.new_Pvariable(config[CONF_OUTPUT_ID])
     await light.register_light(var, config)
     await cg.register_component(var, config)
-    
-    if CONF_PIN in config:
-        cg.add(var.add_leds(config[CONF_NUM_LEDS], config[CONF_PIN]))
-    else:
+
+    cg.add(var.set_num_leds(config[CONF_NUM_LEDS]))
+    cg.add(var.set_pin(config[CONF_PIN]))
+
+    if CONF_MAX_REFRESH_RATE in config:
+        cg.add(var.set_max_refresh_rate(config[CONF_MAX_REFRESH_RATE]))
+
+    if CONF_CHIPSET in config:
+        chipset = CHIPSETS[config[CONF_CHIPSET]]
         cg.add(
-            var.add_leds(
-                config[CONF_NUM_LEDS], config[CONF_CLOCK_PIN], config[CONF_DATA_PIN]
+            var.set_led_params(
+                chipset.bit0_high,
+                chipset.bit0_low,
+                chipset.bit1_high,
+                chipset.bit1_low,
             )
         )
+    else:
+        cg.add(
+            var.set_led_params(
+                config[CONF_BIT0_HIGH],
+                config[CONF_BIT0_LOW],
+                config[CONF_BIT1_HIGH],
+                config[CONF_BIT1_LOW],
+            )
+        )
+
+    cg.add(var.set_channels(config[CONF_CHANNELS]))
     
-    cg.add(var.set_pixel_order(getattr(ESPCWWWNeoPixelOrder, config[CONF_TYPE])))
+    if CONF_COLD_WHITE_COLOR_TEMPERATURE in config:
+        cg.add(var.set_cold_white_temperature(config[CONF_COLD_WHITE_COLOR_TEMPERATURE]))
+    if CONF_WARM_WHITE_COLOR_TEMPERATURE in config:
+        cg.add(var.set_warm_white_temperature(config[CONF_WARM_WHITE_COLOR_TEMPERATURE]))
     
-    cg.add(var.set_temperature_cw(config[CONF_COLD_WHITE_COLOR_TEMPERATURE]))
-    cg.add(var.set_temperature_ww(config[CONF_WARM_WHITE_COLOR_TEMPERATURE]))
-    
-    # https://github.com/Makuna/NeoPixelBus/blob/master/library.json
-    # Version Listed Here: https://registry.platformio.org/libraries/makuna/NeoPixelBus/versions
-    cg.add_library("makuna/NeoPixelBus", "2.7.3")
+    cg.add(
+        var.set_rmt_channel(
+            getattr(rmt_channel_t, f"RMT_CHANNEL_{config[CONF_RMT_CHANNEL]}")
+        )
+    )
