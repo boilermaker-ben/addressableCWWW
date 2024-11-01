@@ -6,7 +6,7 @@ Custom ESPHome component to control an addressable CWWW LED strip (WS2811) that 
 This is the Amazon listing for the product:
 https://www.amazon.com/BTF-LIGHTING-Addressable-Flexible-3000K-6000K-Decoration/dp/B0BNDRF325
 
-Copy all files into an "esp32_rmt_led_strip_channels" folder within the "custom_components" ESPHome directory, then reference the component in the ESPHome YAML config file as such:
+Copy all four files into an "esp32_rmt_led_strip_channels" folder within the "custom_components" ESPHome directory, then reference the component in the ESPHome YAML config file as such:
 ```
 external_components:
   - source: custom_components/
